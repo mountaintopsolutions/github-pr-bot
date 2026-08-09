@@ -40,7 +40,7 @@ jobs:
   ai-pr-bot:
     runs-on: ubuntu-latest
     steps:
-      - uses: jacsamell/github-pr-bot@v1
+      - uses: mountaintopsolutions/github-pr-bot@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           auto_review: true
@@ -60,7 +60,7 @@ jobs:
   ai-pr-bot:
     runs-on: ubuntu-latest
     steps:
-      - uses: jacsamell/github-pr-bot@v1
+      - uses: mountaintopsolutions/github-pr-bot@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}

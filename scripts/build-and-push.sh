@@ -6,8 +6,34 @@
 set -e
 
 # Configuration
-IMAGE_NAME="ghcr.io/jacsamell/github-pr-bot"
+# Derived from the repository so a fork publishes to its own registry namespace rather than
+# failing to push to upstream's. Override with IMAGE_NAME to publish somewhere else.
+# GHCR requires a lowercase path, while GitHub owner/repo names may not be.
+if [ -z "${IMAGE_NAME:-}" ]; then
+    REPO_PATH="${GITHUB_REPOSITORY:-}"
+    if [ -z "$REPO_PATH" ]; then
+        # local run: fall back to the origin remote. Parameter expansion rather than a regex, so
+        # this behaves the same under BSD and GNU tooling, for every remote URL form:
+        #   git@github.com:owner/repo.git, https://host/owner/repo.git, ssh://git@host/owner/repo
+        ORIGIN_URL=$(git config --get remote.origin.url || true)
+        ORIGIN_URL="${ORIGIN_URL%.git}"
+        ORIGIN_URL="${ORIGIN_URL%/}"
+        if [ -n "$ORIGIN_URL" ]; then
+            REPO_NAME="${ORIGIN_URL##*/}"
+            OWNER_PART="${ORIGIN_URL%/*}"
+            OWNER="${OWNER_PART##*[:/]}"
+            [ -n "$OWNER" ] && [ -n "$REPO_NAME" ] && REPO_PATH="$OWNER/$REPO_NAME"
+        fi
+    fi
+    if [ -z "$REPO_PATH" ]; then
+        echo "❌ Cannot determine the image name: set IMAGE_NAME or GITHUB_REPOSITORY" >&2
+        exit 1
+    fi
+    IMAGE_NAME="ghcr.io/$(echo "$REPO_PATH" | tr '[:upper:]' '[:lower:]')"
+fi
 DOCKERFILE="Dockerfile.github_action"
+
+echo "📦 Image: $IMAGE_NAME"
 
 # Get all version tags and find the highest one
 echo "🔍 Finding latest version tag..."
@@ -114,13 +140,18 @@ echo "   - v$MAJOR.$MINOR (updated)"
 echo ""
 echo "🎯 Image supports: linux/amd64, linux/arm64"
 echo ""
+ACTION_REF="${GITHUB_REPOSITORY:-${IMAGE_NAME#ghcr.io/}}"
 echo "To use in GitHub Actions:"
 echo "  uses: docker://$IMAGE_NAME:latest"
 echo "  uses: docker://$IMAGE_NAME:$NEW_VERSION"
-echo "  uses: jacsamell/github-pr-bot@$NEW_VERSION"
-echo "  uses: jacsamell/github-pr-bot@v$MAJOR"
+echo "  uses: $ACTION_REF@$NEW_VERSION"
+echo "  uses: $ACTION_REF@v$MAJOR"
+echo ""
+echo "Note: 'uses: <repo>@<ref>' runs the image named in that ref's action.yaml, not the code at"
+echo "that ref, so action.yaml must point at $IMAGE_NAME for this to publish anything usable."
 
-# Output the new version for GitHub Actions
-if [ -n "$GITHUB_OUTPUT" ]; then
+# Output for GitHub Actions
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+    echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
 fi 

@@ -61,14 +61,14 @@ jobs:
           ${{ github.event.pull_request.title || github.event.head_commit.message }}
           
           ## Docker Images
-          - `ghcr.io/jacsamell/github-pr-bot:latest`
-          - `ghcr.io/jacsamell/github-pr-bot:${{ steps.build.outputs.new_version }}`
-          - `ghcr.io/jacsamell/github-pr-bot:${{ steps.version.outputs.major }}`
-          - `ghcr.io/jacsamell/github-pr-bot:${{ steps.version.outputs.minor }}`
-          
+          - `${{ steps.build.outputs.image_name }}:latest`
+          - `${{ steps.build.outputs.image_name }}:${{ steps.build.outputs.new_version }}`
+          - `${{ steps.build.outputs.image_name }}:${{ steps.version.outputs.major }}`
+          - `${{ steps.build.outputs.image_name }}:${{ steps.version.outputs.minor }}`
+
           ## Usage
           ```yaml
-          uses: docker://ghcr.io/jacsamell/github-pr-bot:${{ steps.build.outputs.new_version }}
+          uses: docker://${{ steps.build.outputs.image_name }}:${{ steps.build.outputs.new_version }}
           ```
         draft: false
         prerelease: false 

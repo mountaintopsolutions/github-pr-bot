@@ -2,7 +2,7 @@ name: Test PR Bot (Development)
 
 # Builds the action's container from this branch and runs it against the PR that triggered the
 # workflow. This is the only way to exercise branch code: action.yaml is a Docker action pinned to
-# a published image, so `uses: ./` would still pull ghcr.io/jacsamell/github-pr-bot:v1.
+# a published image, so `uses: ./` would still pull the published image, not this branch.
 #
 # Model: GLM-5.2 on our self-hosted, OpenAI-compatible endpoint.
 #
