@@ -84,6 +84,19 @@ def test_parse_failure_falls_through_to_the_fallback_model():
     assert calls == ["model-a", "model-a", "model-b"]
 
 
+def test_empty_completion_raises_a_parse_error_not_an_attribute_error():
+    """Reasoning models return content=None once the output budget is spent on reasoning.
+
+    That used to surface as `AttributeError: 'NoneType' object has no attribute 'strip'`, which is
+    indistinguishable from a bug and is not retried.
+    """
+    from pr_agent.tools.pr_code_suggestions import PRCodeSuggestions
+
+    for response in (None, "", "   \n"):
+        with pytest.raises(ModelPredictionParseError):
+            PRCodeSuggestions._prepare_pr_code_suggestions(object(), response)
+
+
 def test_unparseable_suggestions_raise_a_parse_error_not_a_type_error():
     # a TypeError here would be indistinguishable from an auth failure and would not be retried
     from pr_agent.tools.pr_code_suggestions import PRCodeSuggestions

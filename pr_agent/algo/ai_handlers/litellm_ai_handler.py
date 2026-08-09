@@ -38,7 +38,8 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt
 
 from pr_agent.algo import CLAUDE_EXTENDED_THINKING_MODELS, NO_SUPPORT_TEMPERATURE_MODELS, SUPPORT_REASONING_EFFORT_MODELS, USER_MESSAGE_ONLY_MODELS
 from pr_agent.algo.ai_handlers.base_ai_handler import BaseAiHandler
-from pr_agent.algo.utils import ReasoningEffort, get_version, get_max_tokens
+from pr_agent.algo.utils import (ModelPredictionParseError, ReasoningEffort,
+                                 get_version, get_max_tokens)
 from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
 import json
@@ -495,5 +496,23 @@ class LiteLLMAIHandler(BaseAiHandler):
             # for CLI debugging
             if get_settings().config.verbosity_level >= 2:
                 get_logger().info(f"\nAI response:\n{resp}")
+
+            if resp is None or not str(resp).strip():
+                # Reasoning models return content=None when the output budget is spent before any
+                # answer is emitted. Fail here with the reason rather than letting a None response
+                # reach the parsers as an opaque AttributeError.
+                try:
+                    reasoning = getattr(response["choices"][0]["message"], "reasoning_content", "") or ""
+                except Exception:
+                    reasoning = ""
+                detail = ""
+                if finish_reason == "length":
+                    detail = (f" The output budget (max_tokens={kwargs.get('max_tokens')}) was exhausted"
+                              f" before any content was produced - raise config.default_max_output_tokens.")
+                    if reasoning:
+                        detail += f" The model spent it on reasoning ({len(reasoning)} characters of reasoning_content)."
+                get_logger().error(f"Empty response from {model} (finish_reason={finish_reason}).{detail}")
+                raise ModelPredictionParseError(
+                    f"empty response from {model} (finish_reason={finish_reason})")
 
         return resp, finish_reason

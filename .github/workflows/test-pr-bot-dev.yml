@@ -4,7 +4,9 @@ name: Test PR Bot (Development)
 # workflow. This is the only way to exercise branch code: action.yaml is a Docker action pinned to
 # a published image, so `uses: ./` would still pull ghcr.io/jacsamell/github-pr-bot:v1.
 #
-# Model: GLM-5.2 on our self-hosted, OpenAI-compatible endpoint.
+# Model: GLM-5.2 on our self-hosted, OpenAI-compatible endpoint. GLM-5.2 is a reasoning model, so
+# the default 2048-token output budget is not usable: reasoning consumes it and the endpoint
+# returns content=null with finish_reason=length. Hence default_max_output_tokens=32000.
 # Requires on this repository:
 #   secret API_KEY_EXTERNAL          - API key for the endpoint
 #   variable AI_PR_BOT__API_BASE_URL - endpoint base URL, ending in /v1
@@ -70,6 +72,7 @@ jobs:
           -e CONFIG__MODEL="openai/glm-5.2-fp8" \
           -e CONFIG__CUSTOM_MODEL_MAX_TOKENS="240000" \
           -e CONFIG__MAX_MODEL_TOKENS="240000" \
+          -e CONFIG__DEFAULT_MAX_OUTPUT_TOKENS="32000" \
           -e CONFIG__DRY_RUN="false" \
           -e GITHUB_ACTION_CONFIG__AUTO_DESCRIBE="true" \
           -e GITHUB_ACTION_CONFIG__AUTO_REVIEW="true" \
