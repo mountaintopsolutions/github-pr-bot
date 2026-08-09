@@ -18,8 +18,15 @@ name: Test PR Bot (Development)
 # ai_timeout must sit *below* the 300s limit: otherwise the endpoint severs the connection first,
 # the OpenAI SDK retries it three times, and one failure takes 900s and reports itself as a
 # confusing "Connection error" instead of a timeout. ai_retries then multiplies whatever is left.
-# max_context_tokens splits a large diff into smaller parallel calls, each with less to reason
-# about, and keeps output headroom (the output budget is derived from the remaining context).
+#
+# Ticket analysis is off: it reads any '#N' in the PR body as an issue reference, so prose like
+# "suggestion #2" sends it hunting for issues that do not exist, and this repository has Issues
+# disabled anyway.
+#
+# The improve prompt is ~22k tokens and GLM spends ~18k tokens reasoning before it writes anything,
+# so the output budget has to clear that with room for the answer on top. Measured decode is
+# ~140 tok/s at this context size, so 28000 tokens is ~200s - inside both the timeout and the
+# endpoint's limit.
 # Requires on this repository:
 #   secret API_KEY_EXTERNAL          - API key for the endpoint
 #   variable AI_PR_BOT__API_BASE_URL - endpoint base URL, ending in /v1
@@ -86,10 +93,9 @@ jobs:
           -e CONFIG__MODEL="openai/glm-5.2-fp8" \
           -e CONFIG__CUSTOM_MODEL_MAX_TOKENS="240000" \
           -e CONFIG__MAX_MODEL_TOKENS="240000" \
-          -e CONFIG__DEFAULT_MAX_OUTPUT_TOKENS="24000" \
-          -e CONFIG__AI_TIMEOUT="240" \
+          -e CONFIG__DEFAULT_MAX_OUTPUT_TOKENS="28000" \
+          -e CONFIG__AI_TIMEOUT="280" \
           -e CONFIG__AI_RETRIES="2" \
-          -e PR_CODE_SUGGESTIONS__MAX_CONTEXT_TOKENS="40000" \
           -e CONFIG__DRY_RUN="false" \
           -e GITHUB_ACTION_CONFIG__AUTO_DESCRIBE="true" \
           -e GITHUB_ACTION_CONFIG__AUTO_REVIEW="true" \
@@ -102,6 +108,7 @@ jobs:
           -e PR_REVIEWER__ENABLE_REVIEW_LABELS_SECURITY="true" \
           -e PR_REVIEWER__NUM_MAX_FINDINGS="10" \
           -e CONFIG__USE_CURSOR_RULES="true" \
+          -e PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW="false" \
           -e GITHUB_ACTION_CONFIG__PRETTY_LOGS="true" \
           -e CONFIG__FEEDBACK_ON_DRAFT_PR="true" \
           -e GITHUB_ACTION_CONFIG__ENABLE_OUTPUT="false" \

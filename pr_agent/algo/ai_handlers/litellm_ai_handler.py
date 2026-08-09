@@ -39,7 +39,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt
 from pr_agent.algo import CLAUDE_EXTENDED_THINKING_MODELS, NO_SUPPORT_TEMPERATURE_MODELS, SUPPORT_REASONING_EFFORT_MODELS, USER_MESSAGE_ONLY_MODELS
 from pr_agent.algo.ai_handlers.base_ai_handler import BaseAiHandler
 from pr_agent.algo.utils import (ModelPredictionParseError, ReasoningEffort,
-                                 get_version, get_max_tokens)
+                                 get_version, get_max_tokens, get_model_context_window)
 from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
 import json
@@ -392,7 +392,9 @@ class LiteLLMAIHandler(BaseAiHandler):
                 from pr_agent.algo.token_handler import TokenHandler
                 token_handler = TokenHandler()
                 input_tokens_estimate = token_handler.count_tokens(concatenated_inputs)
-                model_ctx = get_max_tokens(model)
+                # the model's real window, not the (possibly clamped) input budget - see
+                # get_model_context_window
+                model_ctx = get_model_context_window(model)
                 # If input + desired output exceed context, reduce max output
                 available_for_output = max(256, model_ctx - input_tokens_estimate - 512)
                 kwargs["max_tokens"] = max(256, min(target_output_tokens, available_for_output))

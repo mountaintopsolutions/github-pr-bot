@@ -1120,6 +1120,23 @@ def get_max_tokens(model):
     return max_tokens_model
 
 
+def get_model_context_window(model):
+    """The model's real context window, ignoring 'config.max_model_tokens'.
+
+    'max_model_tokens' is an *input* budget knob - it exists to stop huge diffs degrading answer
+    quality - and 'improve' lowers it further to 'pr_code_suggestions.max_context_tokens' while it
+    runs. Neither says anything about how much room the model has left for output, so deriving an
+    output budget from get_max_tokens() silently starves the response: clamping the input to 40k
+    on a 240k-context model leaves the model only 40k-minus-prompt to answer in.
+    """
+    settings = get_settings()
+    if model in MAX_TOKENS:
+        return MAX_TOKENS[model]
+    if settings.config.custom_model_max_tokens > 0:
+        return settings.config.custom_model_max_tokens
+    return get_max_tokens(model)  # unknown model: raises with the existing guidance
+
+
 def clip_tokens(text: str, max_tokens: int, add_three_dots=True, num_input_tokens=None, delete_last_line=False) -> str:
     """
     Clip the number of tokens in a string to a maximum number of tokens.
