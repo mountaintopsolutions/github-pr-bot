@@ -6,15 +6,20 @@ name: Test PR Bot (Development)
 #
 # Model: GLM-5.2 on our self-hosted, OpenAI-compatible endpoint.
 #
-# GLM-5.2 is a reasoning model, and the shipped defaults are both sized for non-reasoning models.
-# Measured on this repository's own PR diff (16,298 prompt tokens), one improve-shaped call spent
-# 19,402 completion tokens - ~18k of them reasoning - and took 168 seconds wall clock:
-#   default_max_output_tokens=2048  -> reasoning eats the budget, the endpoint returns
-#                                      content=null with finish_reason=length
-#   ai_timeout=120                  -> the call is killed mid-reasoning, then retried by the
-#                                      OpenAI SDK (x3) and by tenacity (x5)
-# 64000 gives ~3x headroom over the measured usage, and unused budget costs nothing because the
-# model stops on its own. timeout-minutes bounds the job if the endpoint hangs outright.
+# GLM-5.2 is a reasoning model and the endpoint has a hard request-duration limit, so the settings
+# below are sized around both. Measured against the endpoint:
+#   - a request is killed at ~300s regardless of mode: with ignore_eos forcing a long generation,
+#     non-streaming died at 301.2s with an empty body and streaming died at 302.3s mid-stream
+#     after 12,261 chunks. Streaming does not buy more time.
+#   - throughput ~190 tok/s on a small context, so ~24k output tokens fits inside the limit
+#   - one improve-shaped call over a 16k-token diff needed 19,402 completion tokens (~18k of it
+#     reasoning), so 24000 clears the measured requirement while staying inside the window
+#
+# ai_timeout must sit *below* the 300s limit: otherwise the endpoint severs the connection first,
+# the OpenAI SDK retries it three times, and one failure takes 900s and reports itself as a
+# confusing "Connection error" instead of a timeout. ai_retries then multiplies whatever is left.
+# max_context_tokens splits a large diff into smaller parallel calls, each with less to reason
+# about, and keeps output headroom (the output budget is derived from the remaining context).
 # Requires on this repository:
 #   secret API_KEY_EXTERNAL          - API key for the endpoint
 #   variable AI_PR_BOT__API_BASE_URL - endpoint base URL, ending in /v1
@@ -81,8 +86,10 @@ jobs:
           -e CONFIG__MODEL="openai/glm-5.2-fp8" \
           -e CONFIG__CUSTOM_MODEL_MAX_TOKENS="240000" \
           -e CONFIG__MAX_MODEL_TOKENS="240000" \
-          -e CONFIG__DEFAULT_MAX_OUTPUT_TOKENS="64000" \
-          -e CONFIG__AI_TIMEOUT="900" \
+          -e CONFIG__DEFAULT_MAX_OUTPUT_TOKENS="24000" \
+          -e CONFIG__AI_TIMEOUT="240" \
+          -e CONFIG__AI_RETRIES="2" \
+          -e PR_CODE_SUGGESTIONS__MAX_CONTEXT_TOKENS="40000" \
           -e CONFIG__DRY_RUN="false" \
           -e GITHUB_ACTION_CONFIG__AUTO_DESCRIBE="true" \
           -e GITHUB_ACTION_CONFIG__AUTO_REVIEW="true" \

@@ -104,11 +104,24 @@ before it answers. Raise them in the workflow `env:`:
 | Setting | Default | Why it matters |
 |---|---|---|
 | `CONFIG__DEFAULT_MAX_OUTPUT_TOKENS` | `2048` | Reasoning tokens come out of this budget. If it runs out before the answer starts, the endpoint returns `content: null` with `finish_reason: length` and nothing can be parsed. |
-| `CONFIG__AI_TIMEOUT` | `120` | A reasoning pass over a real diff takes minutes. On timeout the call is retried by the OpenAI SDK and again by tenacity, so a too-low value turns one slow call into a very long failure. |
+| `CONFIG__AI_TIMEOUT` | `120` | A reasoning pass over a real diff takes minutes — but see the warning below about setting it too *high*. |
+| `CONFIG__AI_RETRIES` | `5` | Attempts on transient errors. This multiplies with `ai_timeout`. |
+| `PR_CODE_SUGGESTIONS__MAX_CONTEXT_TOKENS` | `100000` | Splits a large diff into smaller parallel `improve` calls, each with less to reason about. |
 
 For reference, GLM-5.2 over a 16k-token diff on the `improve` prompt used **19,402 completion
-tokens** (~18k of them reasoning) and took **168 seconds**. `64000` / `900` leaves comfortable
-headroom; unused output budget costs nothing, because the model stops on its own.
+tokens** (~18k of them reasoning) at roughly **190 tok/s**.
+
+**Check your endpoint's request-duration limit before raising `ai_timeout`.** Self-hosted
+inference commonly sits behind an ingress that severs a request at a fixed duration — 300s is a
+frequent default. Past that point the endpoint drops the connection, and *streaming does not
+help*: measured on one such endpoint, a non-streaming request died at 301.2s with an empty body
+and a streaming request died at 302.3s mid-stream. Worse, the OpenAI SDK retries a severed
+connection three times, so an `ai_timeout` above the limit turns each failure into ~900s reported
+as `Connection error` rather than a timeout, and `ai_retries` multiplies that again.
+
+Set `ai_timeout` *below* the limit, and size `default_max_output_tokens` so generation finishes
+inside it (tokens ÷ throughput). If `improve` still can't finish in the window, lower
+`max_context_tokens` to split the diff into more, smaller calls — or raise the ingress limit.
 
 An empty completion is now reported explicitly, naming the `finish_reason` and the applied
 `max_tokens`, rather than surfacing as a parse error further down.

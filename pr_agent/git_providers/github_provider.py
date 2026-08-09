@@ -1108,7 +1108,12 @@ class GithubProvider(GitProvider):
                 return sub_issues
 
 
-            issue_id = response_json.get("data", {}).get("repository", {}).get("issue", {}).get("id")
+            # GraphQL returns explicit nulls for a missing issue - e.g.
+            # {"data": {"repository": {"issue": None}}, "errors": [{"type": "NOT_FOUND", ...}]} -
+            # so 'or {}' is needed: .get(key, {}) still yields None when the key is present.
+            issue_id = (((response_json.get("data") or {})
+                         .get("repository") or {})
+                        .get("issue") or {}).get("id")
 
             if not issue_id:
                 get_logger().warning(f"Issue ID not found for {issue_url}")

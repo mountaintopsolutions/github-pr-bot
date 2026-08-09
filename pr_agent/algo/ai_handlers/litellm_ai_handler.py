@@ -44,7 +44,10 @@ from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
 import json
 
-OPENAI_RETRIES = 5
+# Attempts for transient API errors. Configurable because these multiply with config.ai_timeout:
+# 5 attempts against a slow self-hosted endpoint with a 15 minute timeout is over an hour of
+# retrying, during which the job looks hung rather than failed.
+OPENAI_RETRIES = max(1, int(get_settings().get("config.ai_retries", 5) or 5))
 
 
 class LiteLLMAIHandler(BaseAiHandler):
