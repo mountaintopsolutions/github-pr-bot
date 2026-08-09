@@ -96,6 +96,23 @@ Self-hosted OpenAI-compatible endpoints (vLLM, SGLang, TGI) can pass provider-sp
 fields — including guided/constrained decoding options — with
 `LITELLM__EXTRA_BODY: '{"guided_decoding_backend": "xgrammar"}'`.
 
+### 🧠 Reasoning models
+
+The defaults are sized for non-reasoning models, and both are too small once the model thinks
+before it answers. Raise them in the workflow `env:`:
+
+| Setting | Default | Why it matters |
+|---|---|---|
+| `CONFIG__DEFAULT_MAX_OUTPUT_TOKENS` | `2048` | Reasoning tokens come out of this budget. If it runs out before the answer starts, the endpoint returns `content: null` with `finish_reason: length` and nothing can be parsed. |
+| `CONFIG__AI_TIMEOUT` | `120` | A reasoning pass over a real diff takes minutes. On timeout the call is retried by the OpenAI SDK and again by tenacity, so a too-low value turns one slow call into a very long failure. |
+
+For reference, GLM-5.2 over a 16k-token diff on the `improve` prompt used **19,402 completion
+tokens** (~18k of them reasoning) and took **168 seconds**. `64000` / `900` leaves comfortable
+headroom; unused output budget costs nothing, because the model stops on its own.
+
+An empty completion is now reported explicitly, naming the `finish_reason` and the applied
+`max_tokens`, rather than surfacing as a parse error further down.
+
 ### 🔑 Required Setup
 
 **1. Get Your Anthropic API Key**

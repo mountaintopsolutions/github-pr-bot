@@ -4,9 +4,17 @@ name: Test PR Bot (Development)
 # workflow. This is the only way to exercise branch code: action.yaml is a Docker action pinned to
 # a published image, so `uses: ./` would still pull ghcr.io/jacsamell/github-pr-bot:v1.
 #
-# Model: GLM-5.2 on our self-hosted, OpenAI-compatible endpoint. GLM-5.2 is a reasoning model, so
-# the default 2048-token output budget is not usable: reasoning consumes it and the endpoint
-# returns content=null with finish_reason=length. Hence default_max_output_tokens=32000.
+# Model: GLM-5.2 on our self-hosted, OpenAI-compatible endpoint.
+#
+# GLM-5.2 is a reasoning model, and the shipped defaults are both sized for non-reasoning models.
+# Measured on this repository's own PR diff (16,298 prompt tokens), one improve-shaped call spent
+# 19,402 completion tokens - ~18k of them reasoning - and took 168 seconds wall clock:
+#   default_max_output_tokens=2048  -> reasoning eats the budget, the endpoint returns
+#                                      content=null with finish_reason=length
+#   ai_timeout=120                  -> the call is killed mid-reasoning, then retried by the
+#                                      OpenAI SDK (x3) and by tenacity (x5)
+# 64000 gives ~3x headroom over the measured usage, and unused budget costs nothing because the
+# model stops on its own. timeout-minutes bounds the job if the endpoint hangs outright.
 # Requires on this repository:
 #   secret API_KEY_EXTERNAL          - API key for the endpoint
 #   variable AI_PR_BOT__API_BASE_URL - endpoint base URL, ending in /v1
@@ -23,6 +31,7 @@ concurrency:
 jobs:
   test-pr-bot-dev:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # PRs opened from a fork of this repository get no secrets, so the run could only fail
     if: github.event.pull_request.head.repo.full_name == github.repository
     permissions:
@@ -72,7 +81,8 @@ jobs:
           -e CONFIG__MODEL="openai/glm-5.2-fp8" \
           -e CONFIG__CUSTOM_MODEL_MAX_TOKENS="240000" \
           -e CONFIG__MAX_MODEL_TOKENS="240000" \
-          -e CONFIG__DEFAULT_MAX_OUTPUT_TOKENS="32000" \
+          -e CONFIG__DEFAULT_MAX_OUTPUT_TOKENS="64000" \
+          -e CONFIG__AI_TIMEOUT="900" \
           -e CONFIG__DRY_RUN="false" \
           -e GITHUB_ACTION_CONFIG__AUTO_DESCRIBE="true" \
           -e GITHUB_ACTION_CONFIG__AUTO_REVIEW="true" \
