@@ -7,6 +7,8 @@ prompt left only ~17.5k tokens to answer in, which a reasoning model spends befo
 anything.
 """
 
+import pytest
+
 from pr_agent.algo.utils import get_max_tokens, get_model_context_window
 from pr_agent.config_loader import get_settings
 
@@ -32,3 +34,12 @@ def test_context_window_matches_when_nothing_is_clamped():
 def test_known_models_use_their_declared_window():
     _configure(max_model_tokens=1000)
     assert get_model_context_window("gpt-3.5-turbo") == 16000
+
+
+def test_unknown_model_raises_rather_than_returning_a_clamped_value():
+    # the one guarantee this function makes is that it never returns a clamped value, so the
+    # unknown-model path must not fall through to get_max_tokens()
+    get_settings().set("config.custom_model_max_tokens", -1)
+    get_settings().set("config.max_model_tokens", 40000)
+    with pytest.raises(Exception, match="custom_model_max_tokens"):
+        get_model_context_window(MODEL)

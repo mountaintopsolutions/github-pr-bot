@@ -103,6 +103,30 @@ def test_separator_inside_a_block_scalar_is_left_alone():
     assert data["code_suggestions"][0]["improved_code"] == "Title\n=====\nbody\n"
 
 
+def test_sequence_indentation_does_not_leak_into_a_later_mapping():
+    # once the sequence ends, its indentation says nothing about what follows: 'y' belongs to
+    # 'review', and promoting it to a top-level item would break the whole document
+    text = (
+        "code_suggestions:\n"
+        "- a: 1\n"
+        "review:\n"
+        "  x: 1\n"
+        "=====\n"
+        "  y: 2\n"
+    )
+    fixed = remove_foreign_separator_lines(text)
+    assert "- y: 2" not in fixed, "y must not be promoted into a sequence item"
+    data = yaml.safe_load(fixed)
+    assert data["review"] == {"x": 1, "y": 2}
+    assert data["code_suggestions"] == [{"a": 1}]
+
+
+def test_separator_still_promotes_within_a_live_sequence_after_the_fix():
+    # the reset must not break the case the repair exists for
+    data = _load(RESPONSE_WITH_SEPARATOR)
+    assert len(data["code_suggestions"]) == 2
+
+
 def test_text_without_separators_is_unchanged():
     text = "code_suggestions:\n- relevant_file: |\n    a.py\n  label: |\n    other\n"
     assert remove_foreign_separator_lines(text) == text

@@ -833,6 +833,13 @@ def remove_foreign_separator_lines(response_text: str) -> str:
             if match:
                 item_indent = len(match.group(1))
                 key_indent = item_indent + 1 + len(match.group(2))
+            elif item_indent is not None and line.strip():
+                # A line at or left of the item's own indentation closes the sequence. Without this
+                # the item's indentation would keep describing the rest of the document, and a
+                # later mapping whose keys happen to sit at key_indent would be promoted into a
+                # bogus sequence item.
+                if len(line) - len(line.lstrip(' ')) <= item_indent:
+                    item_indent = key_indent = None
             fixed_lines.append(line)
             i += 1
             continue
@@ -1134,7 +1141,13 @@ def get_model_context_window(model):
         return MAX_TOKENS[model]
     if settings.config.custom_model_max_tokens > 0:
         return settings.config.custom_model_max_tokens
-    return get_max_tokens(model)  # unknown model: raises with the existing guidance
+    # Raise rather than delegating to get_max_tokens(): it guards on the same two conditions so it
+    # would raise too, but going through a function that applies the clamp makes the one guarantee
+    # this function offers - never returning a clamped value - impossible to check locally.
+    get_logger().error(f"Model {model} is not defined in MAX_TOKENS in ./pr_agent/algo/__init__.py "
+                       f"and no custom_model_max_tokens is set")
+    raise Exception(f"Ensure {model} is defined in MAX_TOKENS in ./pr_agent/algo/__init__.py "
+                    f"or set a positive value for it in config.custom_model_max_tokens")
 
 
 def clip_tokens(text: str, max_tokens: int, add_three_dots=True, num_input_tokens=None, delete_last_line=False) -> str:
