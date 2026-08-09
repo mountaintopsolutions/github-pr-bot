@@ -120,8 +120,21 @@ connection three times, so an `ai_timeout` above the limit turns each failure in
 as `Connection error` rather than a timeout, and `ai_retries` multiplies that again.
 
 Set `ai_timeout` *below* the limit, and size `default_max_output_tokens` so generation finishes
-inside it (tokens ÷ throughput). If `improve` still can't finish in the window, lower
-`max_context_tokens` to split the diff into more, smaller calls — or raise the ingress limit.
+inside it (tokens ÷ throughput).
+
+**If the model reasons without converging, disable thinking rather than raising the budget.** On
+the `improve` prompt — the most demanding of the three — GLM-5.2 expanded its reasoning to consume
+whatever it was given and never started the answer: budgets of 17.5k and 28k tokens both returned
+`finish_reason: length` with **zero characters of content**. Raising the budget only buys more
+deliberation. Turning thinking off produced a complete response in 24s instead:
+
+```yaml
+env:
+  LITELLM__EXTRA_BODY: '{"chat_template_kwargs": {"enable_thinking": false}}'
+```
+
+Note that `reasoning_effort: low` was ignored by that endpoint — it still burned the full budget on
+reasoning — so verify whichever lever you pick actually takes effect.
 
 An empty completion is now reported explicitly, naming the `finish_reason` and the applied
 `max_tokens`, rather than surfacing as a parse error further down.

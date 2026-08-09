@@ -85,11 +85,17 @@ jobs:
         OPENAI__KEY: ${{ secrets.API_KEY_EXTERNAL }}
         OPENAI__API_BASE: ${{ vars.AI_PR_BOT__API_BASE_URL }}
         GITHUB_TOKEN: ${{ github.token }}
+        # GLM-5.2 expands its reasoning to fill whatever output budget it is given on the improve
+        # prompt and never reaches an answer - 17.5k and 28k budgets both came back
+        # finish_reason=length with 0 characters of content. Turning thinking off is the only
+        # lever that worked: 24s and a complete response, against 190s and nothing.
+        LITELLM__EXTRA_BODY: '{"chat_template_kwargs": {"enable_thinking": false}}'
       run: |
         docker run --rm \
           -e OPENAI__KEY \
           -e OPENAI__API_BASE \
           -e GITHUB_TOKEN \
+          -e LITELLM__EXTRA_BODY \
           -e CONFIG__MODEL="openai/glm-5.2-fp8" \
           -e CONFIG__CUSTOM_MODEL_MAX_TOKENS="240000" \
           -e CONFIG__MAX_MODEL_TOKENS="240000" \
