@@ -94,7 +94,9 @@ runs:
   # Must be a literal - the 'runs:' block has no access to ${{ github.repository }} - so a fork
   # has to point this at its own registry namespace. Published by scripts/build-and-push.sh,
   # which derives the same name from GITHUB_REPOSITORY.
-  image: 'docker://ghcr.io/mountaintopsolutions/github-pr-bot:v1'
+  # The tag is pinned to the pre-release built by build-and-push.yml (VERSION there). Keep the two
+  # in step: the script does not rewrite this file, and a pre-release does not move ':v1'.
+  image: 'docker://ghcr.io/mountaintopsolutions/github-pr-bot:v1.0.12-dctest1'
   env:
     ANTHROPIC__KEY: ${{ inputs.anthropic_api_key }}
     GITHUB_TOKEN: ${{ inputs.github_token }}

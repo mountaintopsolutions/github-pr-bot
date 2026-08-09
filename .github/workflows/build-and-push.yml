@@ -37,21 +37,16 @@ jobs:
     
     - name: Run build and push script
       id: build
+      env:
+        # Pin the published version. Remove this to go back to auto-incrementing the highest tag.
+        # A '-suffix' marks it a pre-release: only this tag is published, and latest/vN/vN.M are
+        # left pointing at the last stable build.
+        VERSION: v1.0.12-dctest1
       run: |
         chmod +x scripts/build-and-push.sh
         scripts/build-and-push.sh
-    
-    - name: Extract version components
-      id: version
-      run: |
-        VERSION=${{ steps.build.outputs.new_version }}
-        # Remove 'v' prefix and split into components
-        VERSION_NUM=${VERSION#v}
-        MAJOR=$(echo $VERSION_NUM | cut -d. -f1)
-        MINOR=$(echo $VERSION_NUM | cut -d. -f2)
-        echo "major=v$MAJOR" >> $GITHUB_OUTPUT
-        echo "minor=v$MAJOR.$MINOR" >> $GITHUB_OUTPUT
-    
+
+
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
       with:
@@ -61,14 +56,11 @@ jobs:
           ${{ github.event.pull_request.title || github.event.head_commit.message }}
           
           ## Docker Images
-          - `${{ steps.build.outputs.image_name }}:latest`
-          - `${{ steps.build.outputs.image_name }}:${{ steps.build.outputs.new_version }}`
-          - `${{ steps.build.outputs.image_name }}:${{ steps.version.outputs.major }}`
-          - `${{ steps.build.outputs.image_name }}:${{ steps.version.outputs.minor }}`
+          ${{ steps.build.outputs.docker_tags }}
 
           ## Usage
           ```yaml
           uses: docker://${{ steps.build.outputs.image_name }}:${{ steps.build.outputs.new_version }}
           ```
         draft: false
-        prerelease: false 
+        prerelease: ${{ steps.build.outputs.is_prerelease }} 
