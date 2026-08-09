@@ -439,6 +439,20 @@ class LiteLLMAIHandler(BaseAiHandler):
                 merged_headers.update(litellm_extra_headers)
                 kwargs["extra_headers"] = merged_headers
 
+            # Passthrough for provider-specific request body fields. This is how self-hosted
+            # OpenAI-compatible servers (vLLM, SGLang, TGI) opt into constrained/guided decoding,
+            # e.g. LITELLM__EXTRA_BODY='{"guided_decoding_backend": "xgrammar"}'.
+            if get_settings().get("LITELLM.EXTRA_BODY", None):
+                try:
+                    litellm_extra_body = json.loads(get_settings().litellm.extra_body)
+                    if not isinstance(litellm_extra_body, dict):
+                        raise ValueError("LITELLM.EXTRA_BODY must be a JSON object")
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"LITELLM.EXTRA_BODY contains invalid JSON: {str(e)}")
+                merged_body = dict(kwargs.get("extra_body", {}))
+                merged_body.update(litellm_extra_body)
+                kwargs["extra_body"] = merged_body
+
             # Ensure Anthropic 1M-context beta is enabled for relevant Claude models (not Bedrock)
             try:
                 if (

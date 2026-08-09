@@ -30,10 +30,22 @@ inputs:
     description: 'AI model to use (e.g., anthropic/claude-sonnet-4-20250514)'
     required: false
     default: 'anthropic/claude-sonnet-4-20250514'
+  fallback_models:
+    description: 'Comma-separated list of models to try, in order, if the main model fails (e.g. "anthropic/claude-sonnet-4-20250514,gpt-4o")'
+    required: false
+    default: ''
   max_model_tokens:
     description: 'Maximum tokens for AI model'
     required: false
     default: '1000000'
+  fail_on_tool_error:
+    description: 'When to fail the action step: "all" (only when every enabled tool failed), "any" (when any tool failed), or "none"'
+    required: false
+    default: 'all'
+  parse_failure_retries:
+    description: 'How many times to retry the same model when its response cannot be parsed'
+    required: false
+    default: '1'
   require_trigger:
     description: 'Require ##prbot trigger in PR description'
     required: false
@@ -88,7 +100,10 @@ runs:
     GITHUB_ACTION_CONFIG__AUTO_IMPROVE: ${{ inputs.auto_improve }}
     CONFIG__ENABLE_AUTO_APPROVAL: ${{ inputs.enable_auto_approval }}
     CONFIG__MODEL: ${{ inputs.model }}
+    CONFIG__FALLBACK_MODELS: ${{ inputs.fallback_models }}
     CONFIG__MAX_MODEL_TOKENS: ${{ inputs.max_model_tokens }}
+    CONFIG__FAIL_ON_TOOL_ERROR: ${{ inputs.fail_on_tool_error }}
+    CONFIG__PARSE_FAILURE_RETRIES: ${{ inputs.parse_failure_retries }}
     CONFIG__REQUIRE_AIDESC_TRIGGER: ${{ inputs.require_trigger }}
     PR_REVIEWER__NUM_MAX_FINDINGS: ${{ inputs.max_findings }}
     GITHUB_ACTION_CONFIG__PRETTY_LOGS: ${{ inputs.pretty_logs }}

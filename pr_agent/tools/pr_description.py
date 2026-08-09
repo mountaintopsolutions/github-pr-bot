@@ -15,7 +15,8 @@ from pr_agent.algo.pr_processing import (OUTPUT_BUFFER_TOKENS_HARD_THRESHOLD,
                                          get_pr_diff_multiple_patchs,
                                          retry_with_fallback_models)
 from pr_agent.algo.token_handler import TokenHandler
-from pr_agent.algo.utils import (ModelType, PRDescriptionHeader, clip_tokens,
+from pr_agent.algo.utils import (ModelPredictionParseError, ModelType,
+                                 PRDescriptionHeader, clip_tokens,
                                  get_max_tokens, get_user_labels, load_yaml,
                                  set_custom_labels,
                                  show_relevant_configurations)
@@ -90,6 +91,9 @@ class PRDescription:
         self.patches_diff = None
         self.prediction = None
         self.file_label_dict = None
+        # set to True when run() swallows an error, so callers can tell a failed run from a
+        # successful one without changing run()'s exception semantics
+        self.run_failed = False
 
     async def run(self):
         try:
@@ -193,6 +197,7 @@ class PRDescription:
                 get_settings().data = {"artifact": pr_body}
                 return
         except Exception as e:
+            self.run_failed = True
             get_logger().error(f"Error generating PR description {self.pr_id}: {e}",
                                artifact={"traceback": traceback.format_exc()})
 
@@ -318,6 +323,11 @@ class PRDescription:
                 if load_yaml(prediction_headers, keys_fix_yaml=self.keys_fix):
                     get_logger().debug(f"Using only headers for describe {self.pr_id}")
                     self.prediction = prediction_headers
+
+        # Validate the response parses while still inside retry_with_fallback_models' scope, so an
+        # unparseable response re-rolls the model instead of aborting the tool downstream.
+        if self.prediction and not isinstance(load_yaml(self.prediction.strip(), keys_fix_yaml=self.keys_fix), dict):
+            raise ModelPredictionParseError("the model response could not be parsed into a PR description")
 
     async def extend_uncovered_files(self, original_prediction: str) -> str:
         try:

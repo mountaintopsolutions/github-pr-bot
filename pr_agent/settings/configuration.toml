@@ -8,7 +8,10 @@
 # models
 # Leave blank to enable auto-selection in config_loader.py (GPT-5 if OpenAI key, else Claude Sonnet 4 if Anthropic key)
 model=""
-fallback_models=[]
+fallback_models=[] # models to try, in order, if the main model fails (also settable via CONFIG__FALLBACK_MODELS)
+parse_failure_retries=1 # times to re-roll the *same* model when its response cannot be parsed (a sampling artifact, unlike auth/quota errors)
+log_raw_response_on_parse_failure=false # log the full unparseable model response (a truncated excerpt is always logged)
+fail_on_tool_error="all" # GitHub Action exit policy: "all" (fail only if every enabled tool failed), "any", or "none"
 #model_reasoning="o4-mini" # dedictated reasoning model for self-reflection
 #model_weak="gpt-4o" # optional, a weaker model to use for some easier tasks
 # CLI
@@ -330,6 +333,9 @@ pr_commands = [
 [litellm]
 # use_client = false
 # drop_params = false
+# extra_headers = '{"X-Example": "value"}'   # JSON object merged into the request headers
+# extra_body = '{"guided_decoding_backend": "xgrammar"}'  # JSON object merged into the request body,
+#   for provider-specific options such as guided/constrained decoding on self-hosted OpenAI-compatible servers
 enable_callbacks = false
 success_callback = []
 failure_callback = []

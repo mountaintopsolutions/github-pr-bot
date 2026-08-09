@@ -783,6 +783,77 @@ def _fix_key_value(key: str, value: str):
     return key, value
 
 
+class ModelPredictionParseError(Exception):
+    """Raised when a model response could not be parsed into the structure the tool expects.
+
+    Kept distinct from transport errors (auth, rate limit, timeout) because it is usually a
+    sampling artifact: re-rolling the same model frequently succeeds, whereas retrying an
+    authentication failure never will. See `retry_with_fallback_models`.
+    """
+
+
+# How much of an unparseable model response to echo into the logs by default.
+PARSE_FAILURE_RESPONSE_LOG_CHARS = 2000
+
+# Markdown-style horizontal rules / conflict-marker-like separators that models sometimes emit
+# between entries of a structured response. Note that '---' is deliberately excluded: it is a
+# legitimate YAML document separator.
+FOREIGN_SEPARATOR_LINE = re.compile(r'^( *)(?:={3,}|-{4,}|~{3,}|\*{3,}|_{3,})[ \t]*$')
+
+# A YAML sequence item, e.g. '- relevant_file: |'
+YAML_SEQUENCE_ITEM = re.compile(r'^(\s*)-(\s+)(?=\S)')
+
+
+def remove_foreign_separator_lines(response_text: str) -> str:
+    """Remove non-YAML separator lines (e.g. '=======', '***') that a model emitted between
+    entries of an otherwise well-formed YAML document.
+
+    Dropping such a line outright is not safe: when it sits between two sequence items, the keys
+    that followed it get merged into the previous item's mapping, and YAML's last-key-wins
+    duplicate handling silently produces a hybrid entry (e.g. suggestion #2's code attributed to
+    suggestion #1's file). This is boundary-aware instead: when the block that follows the
+    separator is indented like the *body* of the current sequence item, it is promoted to a new
+    sequence item so both entries survive intact. Anything incomplete that results is dropped
+    later by the per-entry schema validation, which is the safe failure mode.
+    """
+    lines = response_text.split('\n')
+    fixed_lines = []
+    item_indent = key_indent = None  # indentation of the innermost open sequence item
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        separator = FOREIGN_SEPARATOR_LINE.match(line)
+        # Only treat a separator as foreign when it is no deeper than the enclosing sequence item.
+        # Block scalar content is always indented deeper than its key, so this guarantees we never
+        # touch a '=====' or '-----' that is part of the code or markdown inside a block scalar.
+        if separator and len(separator.group(1)) > (item_indent or 0):
+            separator = None
+        if not separator:
+            match = YAML_SEQUENCE_ITEM.match(line)
+            if match:
+                item_indent = len(match.group(1))
+                key_indent = item_indent + 1 + len(match.group(2))
+            fixed_lines.append(line)
+            i += 1
+            continue
+
+        # skip the separator, and look at the next non-empty line
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        if (key_indent is not None and j < len(lines) and
+                len(lines[j]) - len(lines[j].lstrip(' ')) == key_indent):
+            # the following block continues at the current item's key indentation: it is a new
+            # entry the model separated with a rule, not a continuation of the previous one
+            # keep the key at its original column so the item's remaining lines still line up
+            fixed_lines.append(' ' * item_indent + '-' +
+                               ' ' * (key_indent - item_indent - 1) + lines[j][key_indent:])
+            i = j + 1
+        else:
+            i += 1
+    return '\n'.join(fixed_lines)
+
+
 def load_yaml(response_text: str, keys_fix_yaml: List[str] = [], first_key="", last_key="") -> dict:
     response_text_original = copy.deepcopy(response_text)
     response_text = response_text.strip('\n').removeprefix('```yaml').rstrip().removesuffix('```')
@@ -795,6 +866,19 @@ def load_yaml(response_text: str, keys_fix_yaml: List[str] = [], first_key="", l
         if not data:
             get_logger().error(f"Failed to parse AI prediction after fallbacks",
                                artifact={'response_text': response_text})
+            # The 'artifact' extra is not rendered by the console log format, which leaves CI logs
+            # showing *that* parsing failed without showing *what* failed to parse. Emit the raw
+            # response inline as well, truncated unless verbosity is raised.
+            log_full = get_settings().get("config.log_raw_response_on_parse_failure", False)
+            if log_full or get_settings().get("config.verbosity_level", 0) >= 2:
+                get_logger().error(f"Raw AI response that failed to parse:\n{response_text}")
+            else:
+                truncated = response_text[:PARSE_FAILURE_RESPONSE_LOG_CHARS]
+                if len(response_text) > PARSE_FAILURE_RESPONSE_LOG_CHARS:
+                    truncated += f"\n... [{len(response_text) - PARSE_FAILURE_RESPONSE_LOG_CHARS} more characters]"
+                get_logger().error(
+                    "Raw AI response that failed to parse (truncated; set config.verbosity_level=2 "
+                    f"or config.log_raw_response_on_parse_failure=true for the full text):\n{truncated}")
         else:
             get_logger().info(f"Successfully parsed AI prediction after fallbacks",
                               artifact={'response_text': response_text})
@@ -809,7 +893,12 @@ def try_fix_yaml(response_text: str,
                  response_text_original="") -> dict:
     response_text_lines = response_text.split('\n')
 
-    keys_yaml = ['relevant line:', 'suggestion content:', 'relevant file:', 'existing code:', 'improved code:', 'label:']
+    # both spellings: the prompt schemas emit underscored keys, while the space-separated names
+    # are kept for older/custom prompts. Callers can add more via 'keys_fix_yaml'.
+    keys_yaml = ['relevant line:', 'suggestion content:', 'relevant file:', 'existing code:',
+                 'improved code:', 'label:',
+                 'relevant_line:', 'suggestion_content:', 'relevant_file:', 'existing_code:',
+                 'improved_code:', 'one_sentence_summary:']
     keys_yaml = keys_yaml + keys_fix_yaml
 
     # first fallback - try to convert 'relevant line: ...' to relevant line: |-\n        ...'
@@ -843,6 +932,18 @@ def try_fix_yaml(response_text: str,
         try:
             data = yaml.safe_load('\n'.join(response_text_lines_copy))
             get_logger().info(f"Successfully parsed AI prediction after replacing | with |2 and adding spaces")
+            return data
+        except:
+            pass
+
+    # 1.7 fallback - remove markdown-style separator lines ('=======', '***', ...) that the model
+    # emitted between entries. Unlike the fallbacks around it, this one handles text that is
+    # *well-formed YAML containing a foreign line* rather than malformed YAML.
+    response_text_no_separators = remove_foreign_separator_lines(response_text)
+    if response_text_no_separators != response_text:
+        try:
+            data = yaml.safe_load(response_text_no_separators)
+            get_logger().info("Successfully parsed AI prediction after removing separator lines")
             return data
         except:
             pass

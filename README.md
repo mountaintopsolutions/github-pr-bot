@@ -69,9 +69,32 @@ jobs:
           auto_improve: true
           enable_auto_approval: true
           model: 'anthropic/claude-sonnet-4-20250514'
+          fallback_models: 'anthropic/claude-3-5-haiku-20241022'
           max_model_tokens: '1000000'
           require_trigger: false
+          fail_on_tool_error: 'all'
 ```
+
+### 🚦 Reliability & failure reporting
+
+Each enabled tool (`describe`, `review`, `improve`) runs independently: one failing never stops the
+others. What changed is that a failure is now *reported* as one.
+
+- Every run ends with a summary line, e.g. `GitHub PR Bot summary: describe=ok, review=ok, improve=FAILED`.
+- `✅ <tool> completed` is only logged when the tool actually completed.
+- `fail_on_tool_error` controls the step's exit code:
+  - `all` (default) — fail only when every enabled tool failed (auth, quota or network outage)
+  - `any` — fail as soon as one tool fails
+  - `none` — never fail the step
+- Model responses that can't be parsed are retried on the same model (`parse_failure_retries`,
+  default `1`) before falling through to `fallback_models`. A malformed response is usually a
+  sampling artifact, unlike an auth error, and a re-roll normally succeeds.
+- On a parse failure the raw model response is logged (truncated). Set `CONFIG__VERBOSITY_LEVEL: 2`
+  or `CONFIG__LOG_RAW_RESPONSE_ON_PARSE_FAILURE: true` in the workflow `env:` for the full text.
+
+Self-hosted OpenAI-compatible endpoints (vLLM, SGLang, TGI) can pass provider-specific request
+fields — including guided/constrained decoding options — with
+`LITELLM__EXTRA_BODY: '{"guided_decoding_backend": "xgrammar"}'`.
 
 ### 🔑 Required Setup
 
@@ -101,8 +124,11 @@ jobs:
 | `auto_improve` | Enable code improvement suggestions | ❌ No | `true` |
 | `enable_auto_approval` | Enable automatic approval of safe changes | ❌ No | `false` |
 | `model` | AI model to use | ❌ No | `anthropic/claude-sonnet-4-20250514` |
+| `fallback_models` | Comma-separated models to try, in order, if the main model fails | ❌ No | - |
 | `max_model_tokens` | Maximum tokens for AI model | ❌ No | `1000000` |
 | `require_trigger` | Require ##prbot trigger in PR description | ❌ No | `false` |
+| `fail_on_tool_error` | When to fail the step: `all` (only when every enabled tool failed), `any`, or `none` | ❌ No | `all` |
+| `parse_failure_retries` | Times to retry the same model when its response can't be parsed | ❌ No | `1` |
 
 ## 📤 Outputs
 
