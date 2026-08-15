@@ -40,7 +40,7 @@ jobs:
   ai-pr-bot:
     runs-on: ubuntu-latest
     steps:
-      - uses: jacsamell/github-pr-bot@v1
+      - uses: mountaintopsolutions/github-pr-bot@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           auto_review: true
@@ -60,7 +60,7 @@ jobs:
   ai-pr-bot:
     runs-on: ubuntu-latest
     steps:
-      - uses: jacsamell/github-pr-bot@v1
+      - uses: mountaintopsolutions/github-pr-bot@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -69,9 +69,75 @@ jobs:
           auto_improve: true
           enable_auto_approval: true
           model: 'anthropic/claude-sonnet-4-20250514'
+          fallback_models: 'anthropic/claude-3-5-haiku-20241022'
           max_model_tokens: '1000000'
           require_trigger: false
+          fail_on_tool_error: 'all'
 ```
+
+### 🚦 Reliability & failure reporting
+
+Each enabled tool (`describe`, `review`, `improve`) runs independently: one failing never stops the
+others. What changed is that a failure is now *reported* as one.
+
+- Every run ends with a summary line, e.g. `GitHub PR Bot summary: describe=ok, review=ok, improve=FAILED`.
+- `✅ <tool> completed` is only logged when the tool actually completed.
+- `fail_on_tool_error` controls the step's exit code:
+  - `all` (default) — fail only when every enabled tool failed (auth, quota or network outage)
+  - `any` — fail as soon as one tool fails
+  - `none` — never fail the step
+- Model responses that can't be parsed are retried on the same model (`parse_failure_retries`,
+  default `1`) before falling through to `fallback_models`. A malformed response is usually a
+  sampling artifact, unlike an auth error, and a re-roll normally succeeds.
+- On a parse failure the raw model response is logged (truncated). Set `CONFIG__VERBOSITY_LEVEL: 2`
+  or `CONFIG__LOG_RAW_RESPONSE_ON_PARSE_FAILURE: true` in the workflow `env:` for the full text.
+
+Self-hosted OpenAI-compatible endpoints (vLLM, SGLang, TGI) can pass provider-specific request
+fields — including guided/constrained decoding options — with
+`LITELLM__EXTRA_BODY: '{"guided_decoding_backend": "xgrammar"}'`.
+
+### 🧠 Reasoning models
+
+The defaults are sized for non-reasoning models, and both are too small once the model thinks
+before it answers. Raise them in the workflow `env:`:
+
+| Setting | Default | Why it matters |
+|---|---|---|
+| `CONFIG__DEFAULT_MAX_OUTPUT_TOKENS` | `2048` | Reasoning tokens come out of this budget. If it runs out before the answer starts, the endpoint returns `content: null` with `finish_reason: length` and nothing can be parsed. |
+| `CONFIG__AI_TIMEOUT` | `120` | A reasoning pass over a real diff takes minutes — but see the warning below about setting it too *high*. |
+| `CONFIG__AI_RETRIES` | `5` | Attempts on transient errors. This multiplies with `ai_timeout`. |
+| `PR_CODE_SUGGESTIONS__MAX_CONTEXT_TOKENS` | `100000` | Splits a large diff into smaller parallel `improve` calls, each with less to reason about. |
+
+For reference, GLM-5.2 over a 16k-token diff on the `improve` prompt used **19,402 completion
+tokens** (~18k of them reasoning) at roughly **190 tok/s**.
+
+**Check your endpoint's request-duration limit before raising `ai_timeout`.** Self-hosted
+inference commonly sits behind an ingress that severs a request at a fixed duration — 300s is a
+frequent default. Past that point the endpoint drops the connection, and *streaming does not
+help*: measured on one such endpoint, a non-streaming request died at 301.2s with an empty body
+and a streaming request died at 302.3s mid-stream. Worse, the OpenAI SDK retries a severed
+connection three times, so an `ai_timeout` above the limit turns each failure into ~900s reported
+as `Connection error` rather than a timeout, and `ai_retries` multiplies that again.
+
+Set `ai_timeout` *below* the limit, and size `default_max_output_tokens` so generation finishes
+inside it (tokens ÷ throughput).
+
+**If the model reasons without converging, disable thinking rather than raising the budget.** On
+the `improve` prompt — the most demanding of the three — GLM-5.2 expanded its reasoning to consume
+whatever it was given and never started the answer: budgets of 17.5k and 28k tokens both returned
+`finish_reason: length` with **zero characters of content**. Raising the budget only buys more
+deliberation. Turning thinking off produced a complete response in 24s instead:
+
+```yaml
+env:
+  LITELLM__EXTRA_BODY: '{"chat_template_kwargs": {"enable_thinking": false}}'
+```
+
+Note that `reasoning_effort: low` was ignored by that endpoint — it still burned the full budget on
+reasoning — so verify whichever lever you pick actually takes effect.
+
+An empty completion is now reported explicitly, naming the `finish_reason` and the applied
+`max_tokens`, rather than surfacing as a parse error further down.
 
 ### 🔑 Required Setup
 
@@ -101,8 +167,11 @@ jobs:
 | `auto_improve` | Enable code improvement suggestions | ❌ No | `true` |
 | `enable_auto_approval` | Enable automatic approval of safe changes | ❌ No | `false` |
 | `model` | AI model to use | ❌ No | `anthropic/claude-sonnet-4-20250514` |
+| `fallback_models` | Comma-separated models to try, in order, if the main model fails | ❌ No | - |
 | `max_model_tokens` | Maximum tokens for AI model | ❌ No | `1000000` |
 | `require_trigger` | Require ##prbot trigger in PR description | ❌ No | `false` |
+| `fail_on_tool_error` | When to fail the step: `all` (only when every enabled tool failed), `any`, or `none` | ❌ No | `all` |
+| `parse_failure_retries` | Times to retry the same model when its response can't be parsed | ❌ No | `1` |
 
 ## 📤 Outputs
 

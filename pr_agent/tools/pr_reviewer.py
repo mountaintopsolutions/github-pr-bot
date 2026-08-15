@@ -13,7 +13,7 @@ from pr_agent.algo.pr_processing import (add_ai_metadata_to_diff_files,
                                          get_pr_diff,
                                          retry_with_fallback_models)
 from pr_agent.algo.token_handler import TokenHandler
-from pr_agent.algo.utils import (ModelType, PRReviewHeader,
+from pr_agent.algo.utils import (ModelPredictionParseError, ModelType, PRReviewHeader,
                                  convert_to_markdown_v2, github_action_output,
                                  load_yaml, show_relevant_configurations, is_value_no)
 from pr_agent.config_loader import get_settings
@@ -26,6 +26,23 @@ from pr_agent.git_providers.utils import add_repository_rules_to_prompt
 from pr_agent.servers.help import HelpMessage
 from pr_agent.tools.ticket_pr_compliance_check import (
     extract_and_cache_pr_tickets, extract_tickets)
+
+
+REVIEW_FIRST_KEY = 'review'
+REVIEW_LAST_KEY = 'security_concerns'
+REVIEW_KEYS_FIX_YAML = [
+    "ticket_compliance_check", "estimated_effort_to_review_[1-5]:", "security_concerns:",
+    "key_issues_to_review:", "code_suggestions:", "confidence_score_[1-100]:",
+    "complexity_score_[1-10]:", "security_score_[1-10]:", "auto_approve_recommendation:",
+    "auto_approve_reasoning:", "requires_human_approval:", "relevant_file:", "relevant_line:",
+    "suggestion:", "suggestion_header:", "suggestion_content:", "existing_code:", "improved_code:",
+]
+
+
+def load_review_yaml(prediction: str) -> dict:
+    """Parse a review prediction into a dict (or None/other on failure)."""
+    return load_yaml(prediction.strip(), keys_fix_yaml=REVIEW_KEYS_FIX_YAML,
+                     first_key=REVIEW_FIRST_KEY, last_key=REVIEW_LAST_KEY)
 
 
 class PRReviewer:
@@ -45,6 +62,9 @@ class PRReviewer:
             ai_handler (BaseAiHandler): The AI handler to be used for the review. Defaults to None.
             args (list, optional): List of arguments passed to the PRReviewer class. Defaults to None.
         """
+        # set to True when run() swallows an error, so callers can tell a failed run from a
+        # successful one without changing run()'s exception semantics
+        self.run_failed = False
         self.git_provider = get_git_provider_with_context(pr_url)
         self.args = args
         self.incremental = self.parse_incremental(args)  # -i command
@@ -178,7 +198,9 @@ class PRReviewer:
                 get_settings().data = {"artifact": pr_review}
                 return
         except Exception as e:
-            get_logger().error(f"Failed to review PR: {e}")
+            self.run_failed = True
+            get_logger().error(f"Failed to review PR: {e}",
+                               artifact={"traceback": traceback.format_exc()})
 
     async def _prepare_prediction(self, model: str) -> None:
         # Check if we're in auto-approval mode to track pruning
@@ -226,6 +248,11 @@ class PRReviewer:
         if self.patches_diff:
             get_logger().debug(f"PR diff", diff=self.patches_diff)
             self.prediction = await self._get_prediction(model)
+            # Validate the response parses while still inside retry_with_fallback_models' scope, so
+            # an unparseable response re-rolls the model instead of aborting the tool downstream.
+            parsed = load_review_yaml(self.prediction) if self.prediction else None
+            if self.prediction and (not isinstance(parsed, dict) or REVIEW_FIRST_KEY not in parsed):
+                raise ModelPredictionParseError("the model response could not be parsed into a review")
         else:
             get_logger().warning(f"Empty diff for PR: {self.pr_url}")
             self.prediction = None
@@ -264,17 +291,10 @@ class PRReviewer:
         Prepare the PR review by processing the AI prediction and generating a markdown-formatted text that summarizes
         the feedback.
         """
-        first_key = 'review'
-        last_key = 'security_concerns'
-        data = load_yaml(self.prediction.strip(),
-                         keys_fix_yaml=["ticket_compliance_check", "estimated_effort_to_review_[1-5]:", "security_concerns:", "key_issues_to_review:", "code_suggestions:",
-                                        "confidence_score_[1-100]:", "complexity_score_[1-10]:", "security_score_[1-10]:", "auto_approve_recommendation:",
-                                        "auto_approve_reasoning:", "requires_human_approval:", "relevant_file:", "relevant_line:", "suggestion:", "suggestion_header:",
-                                        "suggestion_content:", "existing_code:", "improved_code:"],
-                         first_key=first_key, last_key=last_key)
+        data = load_review_yaml(self.prediction)
         github_action_output(data, 'review')
 
-        if 'review' not in data:
+        if not isinstance(data, dict) or 'review' not in data:
             get_logger().exception("Failed to parse review data", artifact={"data": data})
             return ""
 
@@ -545,7 +565,9 @@ class PRReviewer:
                                                          final_update_message=False)
 
         except Exception as e:
-            get_logger().error(f"Error in auto-approval logic: {e}")
+            self.run_failed = True
+            get_logger().error(f"Error in auto-approval logic: {e}",
+                               artifact={"traceback": traceback.format_exc()})
             error_content = "❌ **Auto-approval failed due to an error**. Manual review required."
             error_comment = f"{PRReviewHeader.REGULAR.value} 🔍\n\n{error_content}"
             
@@ -558,16 +580,9 @@ class PRReviewer:
     def _parse_review_data(self):
         """Parse the AI prediction to extract review data"""
         try:
-            first_key = 'review'
-            last_key = 'security_concerns'
-            data = load_yaml(self.prediction.strip(),
-                             keys_fix_yaml=["ticket_compliance_check", "estimated_effort_to_review_[1-5]:", "security_concerns:", "key_issues_to_review:", "code_suggestions:",
-                                            "confidence_score_[1-100]:", "complexity_score_[1-10]:", "security_score_[1-10]:", "auto_approve_recommendation:",
-                                            "auto_approve_reasoning:", "requires_human_approval:", "relevant_file:", "relevant_line:", "suggestion:", "suggestion_header:",
-                                            "suggestion_content:", "existing_code:", "improved_code:"],
-                             first_key=first_key, last_key=last_key)
-            
-            if 'review' not in data:
+            data = load_review_yaml(self.prediction)
+
+            if not isinstance(data, dict) or 'review' not in data:
                 get_logger().error("No review data found in AI prediction")
                 return None
                 

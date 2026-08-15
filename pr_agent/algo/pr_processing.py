@@ -12,7 +12,8 @@ from pr_agent.algo.git_patch_processing import (
 from pr_agent.algo.language_handler import sort_files_by_main_languages
 from pr_agent.algo.token_handler import TokenHandler
 from pr_agent.algo.types import EDIT_TYPE, FilePatchInfo
-from pr_agent.algo.utils import ModelType, clip_tokens, get_max_tokens, get_model
+from pr_agent.algo.utils import (
+    ModelPredictionParseError, ModelType, clip_tokens, get_max_tokens, get_model)
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers.git_provider import GitProvider
 from pr_agent.log import get_logger
@@ -327,9 +328,28 @@ def generate_full_patch(convert_hunks_to_line_numbers, file_dict, max_tokens_mod
     return total_tokens, patches, remaining_files_list_new, files_in_patch_list
 
 
+async def _generate_with_parse_retries(f: Callable, model: str, parse_retries: int):
+    """Call the model, re-rolling it on unparseable output.
+
+    A malformed response is a sampling artifact rather than a permanent failure, so unlike every
+    other error it is worth retrying the *same* model before moving on to the fallback list.
+    """
+    for attempt in range(parse_retries + 1):
+        try:
+            return await f(model)
+        except ModelPredictionParseError as e:
+            if attempt >= parse_retries:
+                raise
+            get_logger().warning(
+                f"Could not parse the response of {model} ({e}). Retrying the same model "
+                f"(attempt {attempt + 2}/{parse_retries + 1})"
+            )
+
+
 async def retry_with_fallback_models(f: Callable, model_type: ModelType = ModelType.REGULAR):
     all_models = _get_all_models(model_type)
     all_deployments = _get_all_deployments(all_models)
+    parse_retries = max(0, int(get_settings().config.get("parse_failure_retries", 1)))
     # try each (model, deployment_id) pair until one is successful, otherwise raise exception
     for i, (model, deployment_id) in enumerate(zip(all_models, all_deployments)):
         try:
@@ -338,13 +358,17 @@ async def retry_with_fallback_models(f: Callable, model_type: ModelType = ModelT
                 f"{(' from deployment ' + deployment_id) if deployment_id else ''}"
             )
             get_settings().set("openai.deployment_id", deployment_id)
-            return await f(model)
-        except:
+            return await _generate_with_parse_retries(f, model, parse_retries)
+        except Exception as e:
             get_logger().warning(
-                f"Failed to generate prediction with {model}"
+                f"Failed to generate prediction with {model}: {type(e).__name__}: {e}",
+                artifact={"traceback": traceback.format_exc()}
             )
             if i == len(all_models) - 1:  # If it's the last iteration
-                raise Exception(f"Failed to generate prediction with any model of {all_models}")
+                raise Exception(
+                    f"Failed to generate prediction with any model of {all_models}. "
+                    f"Last error: {type(e).__name__}: {e}"
+                ) from e
 
 
 def _get_all_models(model_type: ModelType = ModelType.REGULAR) -> List[str]:
@@ -358,7 +382,9 @@ def _get_all_models(model_type: ModelType = ModelType.REGULAR) -> List[str]:
         model = get_settings().config.model
     fallback_models = get_settings().config.fallback_models
     if not isinstance(fallback_models, list):
-        fallback_models = [m.strip() for m in fallback_models.split(",")]
+        fallback_models = [m.strip() for m in str(fallback_models).split(",")]
+    # drop empty entries, e.g. from an unset 'fallback_models' action input
+    fallback_models = [m for m in fallback_models if m]
     all_models = [model] + fallback_models
     return all_models
 

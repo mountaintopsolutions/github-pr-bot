@@ -1,5 +1,37 @@
 name: Test PR Bot (Development)
 
+# Builds the action's container from this branch and runs it against the PR that triggered the
+# workflow. This is the only way to exercise branch code: action.yaml is a Docker action pinned to
+# a published image, so `uses: ./` would still pull the published image, not this branch.
+#
+# Model: GLM-5.2 on our self-hosted, OpenAI-compatible endpoint.
+#
+# GLM-5.2 is a reasoning model and the endpoint has a hard request-duration limit, so the settings
+# below are sized around both. Measured against the endpoint:
+#   - a request is killed at ~300s regardless of mode: with ignore_eos forcing a long generation,
+#     non-streaming died at 301.2s with an empty body and streaming died at 302.3s mid-stream
+#     after 12,261 chunks. Streaming does not buy more time.
+#   - throughput ~190 tok/s on a small context, so ~24k output tokens fits inside the limit
+#   - one improve-shaped call over a 16k-token diff needed 19,402 completion tokens (~18k of it
+#     reasoning), so 24000 clears the measured requirement while staying inside the window
+#
+# ai_timeout must sit *below* the 300s limit: otherwise the endpoint severs the connection first,
+# the OpenAI SDK retries it three times, and one failure takes 900s and reports itself as a
+# confusing "Connection error" instead of a timeout. ai_retries then multiplies whatever is left.
+#
+# Ticket analysis is off: it reads any '#N' in the PR body as an issue reference, so prose like
+# "suggestion #2" sends it hunting for issues that do not exist, and this repository has Issues
+# disabled anyway.
+#
+# The improve prompt is ~22k tokens and GLM spends ~18k tokens reasoning before it writes anything,
+# so the output budget has to clear that with room for the answer on top. Measured decode is
+# ~140 tok/s at this context size, so 28000 tokens is ~200s - inside both the timeout and the
+# endpoint's limit.
+# Requires on this repository:
+#   secret API_KEY_EXTERNAL          - API key for the endpoint
+#   variable AI_PR_BOT__API_BASE_URL - endpoint base URL, ending in /v1
+# The base URL is a variable rather than a literal because this repository is public.
+
 on:
   pull_request:
     types: [opened, reopened, ready_for_review, synchronize]
@@ -11,6 +43,9 @@ concurrency:
 jobs:
   test-pr-bot-dev:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # PRs opened from a fork of this repository get no secrets, so the run could only fail
+    if: github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
       pull-requests: write
@@ -18,10 +53,23 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      
+
+    - name: Check the endpoint is configured
+      env:
+        OPENAI__KEY: ${{ secrets.API_KEY_EXTERNAL }}
+        OPENAI__API_BASE: ${{ vars.AI_PR_BOT__API_BASE_URL }}
+      run: |
+        missing=""
+        [ -n "$OPENAI__KEY" ]      || missing="$missing secret:API_KEY_EXTERNAL"
+        [ -n "$OPENAI__API_BASE" ] || missing="$missing variable:AI_PR_BOT__API_BASE_URL"
+        if [ -n "$missing" ]; then
+          echo "::error::Missing repository configuration:$missing"
+          exit 1
+        fi
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-      
+
     - name: Build local PR bot image
       uses: docker/build-push-action@v5
       with:
@@ -30,22 +78,45 @@ jobs:
         tags: pr-bot-dev:latest
         load: true
         no-cache: true
-        
+
     - name: Test PR Bot with Development Code
+      env:
+        # passed through to the container by name, so the key never appears in the command line
+        OPENAI__KEY: ${{ secrets.API_KEY_EXTERNAL }}
+        OPENAI__API_BASE: ${{ vars.AI_PR_BOT__API_BASE_URL }}
+        GITHUB_TOKEN: ${{ github.token }}
+        # GLM-5.2 expands its reasoning to fill whatever output budget it is given on the improve
+        # prompt and never reaches an answer - 17.5k and 28k budgets both came back
+        # finish_reason=length with 0 characters of content. Turning thinking off is the only
+        # lever that worked: 24s and a complete response, against 190s and nothing.
+        LITELLM__EXTRA_BODY: '{"chat_template_kwargs": {"enable_thinking": false}}'
       run: |
         docker run --rm \
-          -e ANTHROPIC__KEY="${{ secrets.ANTHROPIC_API_KEY }}" \
-          -e GITHUB_TOKEN="${{ github.token }}" \
+          -e OPENAI__KEY \
+          -e OPENAI__API_BASE \
+          -e GITHUB_TOKEN \
+          -e LITELLM__EXTRA_BODY \
+          -e CONFIG__MODEL="openai/glm-5.2-fp8" \
+          -e CONFIG__CUSTOM_MODEL_MAX_TOKENS="240000" \
+          -e CONFIG__MAX_MODEL_TOKENS="240000" \
+          -e CONFIG__DEFAULT_MAX_OUTPUT_TOKENS="28000" \
+          -e CONFIG__AI_TIMEOUT="280" \
+          -e CONFIG__AI_RETRIES="2" \
+          -e CONFIG__DRY_RUN="false" \
+          -e GITHUB_ACTION_CONFIG__AUTO_DESCRIBE="true" \
           -e GITHUB_ACTION_CONFIG__AUTO_REVIEW="true" \
-          -e CONFIG__ENABLE_AUTO_APPROVAL="true" \
+          -e GITHUB_ACTION_CONFIG__AUTO_IMPROVE="true" \
+          -e CONFIG__ENABLE_AUTO_APPROVAL="false" \
+          -e CONFIG__FAIL_ON_TOOL_ERROR="any" \
+          -e CONFIG__PARSE_FAILURE_RETRIES="1" \
+          -e CONFIG__LOG_RAW_RESPONSE_ON_PARSE_FAILURE="true" \
           -e PR_REVIEWER__ENABLE_REVIEW_LABELS_EFFORT="true" \
           -e PR_REVIEWER__ENABLE_REVIEW_LABELS_SECURITY="true" \
+          -e PR_REVIEWER__NUM_MAX_FINDINGS="10" \
           -e CONFIG__USE_CURSOR_RULES="true" \
-          -e CONFIG__MODEL="anthropic/claude-sonnet-4-20250514" \
-          -e CONFIG__MAX_MODEL_TOKENS="100000" \
-          -e PR_REVIEWER__NUM_MAX_FINDINGS="5" \
+          -e PR_REVIEWER__REQUIRE_TICKET_ANALYSIS_REVIEW="false" \
           -e GITHUB_ACTION_CONFIG__PRETTY_LOGS="true" \
-          -e CONFIG__FEEDBACK_ON_DRAFT_PR="false" \
+          -e CONFIG__FEEDBACK_ON_DRAFT_PR="true" \
           -e GITHUB_ACTION_CONFIG__ENABLE_OUTPUT="false" \
           -e GITHUB_EVENT_PATH="${GITHUB_EVENT_PATH}" \
           -e GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
@@ -62,4 +133,4 @@ jobs:
           -v "${GITHUB_EVENT_PATH}:${GITHUB_EVENT_PATH}" \
           -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" \
           -w "${GITHUB_WORKSPACE}" \
-          pr-bot-dev:latest 
+          pr-bot-dev:latest

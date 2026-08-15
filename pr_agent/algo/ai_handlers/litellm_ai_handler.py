@@ -38,12 +38,16 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt
 
 from pr_agent.algo import CLAUDE_EXTENDED_THINKING_MODELS, NO_SUPPORT_TEMPERATURE_MODELS, SUPPORT_REASONING_EFFORT_MODELS, USER_MESSAGE_ONLY_MODELS
 from pr_agent.algo.ai_handlers.base_ai_handler import BaseAiHandler
-from pr_agent.algo.utils import ReasoningEffort, get_version, get_max_tokens
+from pr_agent.algo.utils import (ModelPredictionParseError, ReasoningEffort,
+                                 get_version, get_max_tokens, get_model_context_window)
 from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
 import json
 
-OPENAI_RETRIES = 5
+# Attempts for transient API errors. Configurable because these multiply with config.ai_timeout:
+# 5 attempts against a slow self-hosted endpoint with a 15 minute timeout is over an hour of
+# retrying, during which the job looks hung rather than failed.
+OPENAI_RETRIES = max(1, int(get_settings().get("config.ai_retries", 5) or 5))
 
 
 class LiteLLMAIHandler(BaseAiHandler):
@@ -388,7 +392,9 @@ class LiteLLMAIHandler(BaseAiHandler):
                 from pr_agent.algo.token_handler import TokenHandler
                 token_handler = TokenHandler()
                 input_tokens_estimate = token_handler.count_tokens(concatenated_inputs)
-                model_ctx = get_max_tokens(model)
+                # the model's real window, not the (possibly clamped) input budget - see
+                # get_model_context_window
+                model_ctx = get_model_context_window(model)
                 # If input + desired output exceed context, reduce max output
                 available_for_output = max(256, model_ctx - input_tokens_estimate - 512)
                 kwargs["max_tokens"] = max(256, min(target_output_tokens, available_for_output))
@@ -439,6 +445,20 @@ class LiteLLMAIHandler(BaseAiHandler):
                 merged_headers.update(litellm_extra_headers)
                 kwargs["extra_headers"] = merged_headers
 
+            # Passthrough for provider-specific request body fields. This is how self-hosted
+            # OpenAI-compatible servers (vLLM, SGLang, TGI) opt into constrained/guided decoding,
+            # e.g. LITELLM__EXTRA_BODY='{"guided_decoding_backend": "xgrammar"}'.
+            if get_settings().get("LITELLM.EXTRA_BODY", None):
+                try:
+                    litellm_extra_body = json.loads(get_settings().litellm.extra_body)
+                    if not isinstance(litellm_extra_body, dict):
+                        raise ValueError("LITELLM.EXTRA_BODY must be a JSON object")
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"LITELLM.EXTRA_BODY contains invalid JSON: {str(e)}")
+                merged_body = dict(kwargs.get("extra_body", {}))
+                merged_body.update(litellm_extra_body)
+                kwargs["extra_body"] = merged_body
+
             # Ensure Anthropic 1M-context beta is enabled for relevant Claude models (not Bedrock)
             try:
                 if (
@@ -481,5 +501,23 @@ class LiteLLMAIHandler(BaseAiHandler):
             # for CLI debugging
             if get_settings().config.verbosity_level >= 2:
                 get_logger().info(f"\nAI response:\n{resp}")
+
+            if resp is None or not str(resp).strip():
+                # Reasoning models return content=None when the output budget is spent before any
+                # answer is emitted. Fail here with the reason rather than letting a None response
+                # reach the parsers as an opaque AttributeError.
+                try:
+                    reasoning = getattr(response["choices"][0]["message"], "reasoning_content", "") or ""
+                except Exception:
+                    reasoning = ""
+                detail = ""
+                if finish_reason == "length":
+                    detail = (f" The output budget (max_tokens={kwargs.get('max_tokens')}) was exhausted"
+                              f" before any content was produced - raise config.default_max_output_tokens.")
+                    if reasoning:
+                        detail += f" The model spent it on reasoning ({len(reasoning)} characters of reasoning_content)."
+                get_logger().error(f"Empty response from {model} (finish_reason={finish_reason}).{detail}")
+                raise ModelPredictionParseError(
+                    f"empty response from {model} (finish_reason={finish_reason})")
 
         return resp, finish_reason

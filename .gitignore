@@ -113,3 +113,5 @@ Thumbs.db
 *.log
 .history/
 temp/
+# local tooling
+uv.lock

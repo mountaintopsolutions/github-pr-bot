@@ -11,7 +11,9 @@ Source code: https://github.com/jacsamell/github-pr-bot
 import asyncio
 import json
 import os
-from typing import Union
+import sys
+from collections import OrderedDict
+from typing import Any, Callable, Union
 
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers.utils import apply_repo_settings
@@ -24,6 +26,10 @@ from pr_agent.tools.pr_reviewer import PRReviewer
 pretty_logs = os.getenv('GITHUB_ACTION_CONFIG.PRETTY_LOGS', 'true').lower() == 'true'
 log_format = LoggingFormat.CONSOLE if pretty_logs else LoggingFormat.JSON
 setup_logger(fmt=log_format, level=get_settings().get("CONFIG.LOG_LEVEL", "INFO"))
+
+
+class ToolFailure(Exception):
+    """Raised when one or more enabled tools did not complete successfully."""
 
 
 def is_true(value: Union[str, bool]) -> bool:
@@ -44,6 +50,69 @@ def get_setting_or_env(key: str, default: Union[str, bool] = None) -> Union[str,
                 os.getenv(key.upper()) or 
                 os.getenv(key.lower()) or 
                 default)
+
+
+def log_step(emoji: str, message: str) -> None:
+    """Log a progress line, prefixed with an emoji when pretty logs are enabled."""
+    get_logger().info(f"{emoji} {message}" if pretty_logs else message)
+
+
+async def run_tool(name: str, factory: Callable[[], Any]) -> bool:
+    """Run a single tool and report whether it actually completed.
+
+    The tools swallow their own exceptions (so that one failure does not abort the others) and
+    flag it via `run_failed`. Both that flag and any exception that does escape are treated as a
+    failure here, so a tool that hard-failed is never logged as completed.
+    """
+    try:
+        tool = factory()
+        await tool.run()
+    except Exception as e:
+        get_logger().error(f"{'❌ ' if pretty_logs else ''}{name} failed: {e}")
+        return False
+    if getattr(tool, "run_failed", False):
+        get_logger().error(f"{'❌ ' if pretty_logs else ''}{name} failed (see the error above)")
+        return False
+    get_logger().info(f"{'✅ ' if pretty_logs else ''}{name} completed")
+    return True
+
+
+def report_outcome(results: "OrderedDict[str, bool]") -> None:
+    """Log a run summary and fail the action according to `config.fail_on_tool_error`.
+
+    Policies:
+      'all'  (default) - exit non-zero only when every enabled tool failed (auth, quota, network)
+      'any'            - exit non-zero when any enabled tool failed
+      'none'           - never exit non-zero (previous behaviour)
+    """
+    if not results:
+        get_logger().info(f"{'🎉 ' if pretty_logs else ''}GitHub PR Bot analysis complete! (no tools enabled)")
+        return
+
+    succeeded = [name for name, ok in results.items() if ok]
+    failed = [name for name, ok in results.items() if not ok]
+    summary = ", ".join(f"{name}={'ok' if ok else 'FAILED'}" for name, ok in results.items())
+
+    if failed:
+        get_logger().error(f"{'⚠️ ' if pretty_logs else ''}GitHub PR Bot summary: {summary}")
+    else:
+        get_logger().info(f"{'🎉 ' if pretty_logs else ''}GitHub PR Bot analysis complete! {summary}")
+
+    policy = str(get_setting_or_env("CONFIG.FAIL_ON_TOOL_ERROR", "all") or "all").strip().lower()
+    if policy in ("true", "yes"):  # tolerate boolean-ish values from action inputs
+        policy = "any"
+    elif policy in ("false", "no"):
+        policy = "none"
+    if policy not in ("all", "any", "none"):
+        get_logger().warning(f"Unknown fail_on_tool_error value '{policy}', falling back to 'all'")
+        policy = "all"
+
+    should_fail = (policy == "any" and failed) or (policy == "all" and failed and not succeeded)
+    if should_fail:
+        get_logger().error(
+            f"{'❌ ' if pretty_logs else ''}Failing the action: {len(failed)} of {len(results)} "
+            f"enabled tool(s) failed ({', '.join(failed)}); fail_on_tool_error={policy}")
+        raise ToolFailure(f"tool(s) failed: {', '.join(failed)}")
 
 
 async def handle_pull_request_event(event_payload: dict) -> None:
@@ -102,74 +171,33 @@ async def handle_pull_request_event(event_payload: dict) -> None:
     else:
         get_logger().info(f"Running GitHub PR Bot: describe={auto_describe}, review={auto_review}, improve={auto_improve}")
 
-    # Run enabled tools
-    try:
-        if is_true(auto_describe):
-            if pretty_logs:
-                get_logger().info("📝 Generating PR description...")
-            else:
-                get_logger().info("Generating PR description...")
-            await PRDescription(pr_url).run()
-            if pretty_logs:
-                get_logger().info("✅ PR description completed")
-            else:
-                get_logger().info("PR description completed")
-            
-        if is_true(auto_review):
-            # Check if auto-approval is enabled
-            enable_auto_approval = get_setting_or_env("CONFIG.ENABLE_AUTO_APPROVAL", False)
-            
-            if is_true(enable_auto_approval):
-                if pretty_logs:
-                    get_logger().info("🔍 Reviewing PR with auto-approval...")
-                else:
-                    get_logger().info("Reviewing PR with auto-approval...")
-                await PRReviewer(pr_url, args=['auto_approve']).run()
-            else:
-                if pretty_logs:
-                    get_logger().info("🔍 Reviewing PR...")
-                else:
-                    get_logger().info("Reviewing PR...")
-                await PRReviewer(pr_url).run()
-                
-            if pretty_logs:
-                get_logger().info("✅ PR review completed")
-            else:
-                get_logger().info("PR review completed")
-            
-        if is_true(auto_improve):
-            if pretty_logs:
-                get_logger().info("💡 Generating code suggestions...")
-            else:
-                get_logger().info("Generating code suggestions...")
-            try:
-                await PRCodeSuggestions(pr_url).run()
-                if pretty_logs:
-                    get_logger().info("✅ Code suggestions completed")
-                else:
-                    get_logger().info("Code suggestions completed")
-            except Exception as e:
-                if pretty_logs:
-                    get_logger().error(f"❌ Code suggestions failed: {e}")
-                else:
-                    get_logger().error(f"Code suggestions failed: {e}")
-                # Don't re-raise the exception to avoid stopping other tools
+    # Run enabled tools. Each tool runs independently: one failing must not prevent the others
+    # from running, but it must also not be reported as a success.
+    results: "OrderedDict[str, bool]" = OrderedDict()
+
+    if is_true(auto_describe):
+        log_step("📝", "Generating PR description...")
+        results["describe"] = await run_tool("PR description", lambda: PRDescription(pr_url))
+
+    if is_true(auto_review):
+        # Check if auto-approval is enabled
+        enable_auto_approval = get_setting_or_env("CONFIG.ENABLE_AUTO_APPROVAL", False)
+
+        if is_true(enable_auto_approval):
+            log_step("🔍", "Reviewing PR with auto-approval...")
+            factory = lambda: PRReviewer(pr_url, args=['auto_approve'])
         else:
-            if pretty_logs:
-                get_logger().info("⏭️ Code suggestions disabled, skipping...")
-            else:
-                get_logger().info("Code suggestions disabled, skipping...")
-            
-        if pretty_logs:
-            get_logger().info("🎉 GitHub PR Bot analysis complete!")
-        else:
-            get_logger().info("GitHub PR Bot analysis complete!")
-    except Exception as e:
-        if pretty_logs:
-            get_logger().error(f"❌ Error running GitHub PR Bot tools: {e}")
-        else:
-            get_logger().error(f"Error running GitHub PR Bot tools: {e}")
-        raise
+            log_step("🔍", "Reviewing PR...")
+            factory = lambda: PRReviewer(pr_url)
+        results["review"] = await run_tool("PR review", factory)
+
+    if is_true(auto_improve):
+        log_step("💡", "Generating code suggestions...")
+        results["improve"] = await run_tool("Code suggestions", lambda: PRCodeSuggestions(pr_url))
+    else:
+        log_step("⏭️", "Code suggestions disabled, skipping...")
+
+    report_outcome(results)
 
 
 async def run_action():
@@ -257,6 +285,8 @@ async def run_action():
                 get_logger().info(f"ℹ️ Unsupported event type: {event_name}")
             else:
                 get_logger().info(f"Unsupported event type: {event_name}")
+    except ToolFailure:
+        raise  # already reported by report_outcome()
     except Exception as e:
         if pretty_logs:
             get_logger().error(f"❌ Error processing {event_name} event: {e}")
@@ -266,4 +296,7 @@ async def run_action():
 
 
 if __name__ == '__main__':
-    asyncio.run(run_action())
+    try:
+        asyncio.run(run_action())
+    except ToolFailure:
+        sys.exit(1)

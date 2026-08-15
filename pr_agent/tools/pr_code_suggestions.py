@@ -18,7 +18,7 @@ from pr_agent.algo.pr_processing import (add_ai_metadata_to_diff_files,
                                          get_pr_diff, get_pr_multi_diffs,
                                          retry_with_fallback_models)
 from pr_agent.algo.token_handler import TokenHandler
-from pr_agent.algo.utils import (ModelType, load_yaml, replace_code_tags,
+from pr_agent.algo.utils import (ModelPredictionParseError, ModelType, load_yaml, replace_code_tags,
                                  show_relevant_configurations, get_max_tokens, clip_tokens, get_model)
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers import (GithubProvider,
@@ -98,6 +98,9 @@ class PRCodeSuggestions:
         self.progress = f"## Generating PR code suggestions\n\n"
         self.progress += f"""\nWork in progress ...<br>\n<img src="https://codium.ai/images/pr_agent/dual_ball_loading-crop.gif" width=48>"""
         self.progress_response = None
+        # set to True when run() swallows an error, so callers can tell a failed run from a
+        # successful one without changing run()'s exception semantics
+        self.run_failed = False
 
     async def run(self):
         try:
@@ -191,6 +194,7 @@ class PRCodeSuggestions:
                 get_settings().data = {"artifact": pr_body}
                 return
         except Exception as e:
+            self.run_failed = True
             get_logger().error(f"Failed to generate code suggestions for PR, error: {e}",
                                artifact={"traceback": traceback.format_exc()})
             if get_settings().config.publish_output:
@@ -499,11 +503,14 @@ class PRCodeSuggestions:
         return suggestion
 
     def _prepare_pr_code_suggestions(self, predictions: str) -> Dict:
-        data = load_yaml(predictions.strip(),
+        data = load_yaml((predictions or "").strip(),
                          keys_fix_yaml=["relevant_file", "suggestion_content", "existing_code", "improved_code"],
                          first_key="code_suggestions", last_key="label")
         if isinstance(data, list):
             data = {'code_suggestions': data}
+        if not isinstance(data, dict) or 'code_suggestions' not in data:
+            raise ModelPredictionParseError(
+                "the model response could not be parsed into code suggestions")
 
         # remove or edit invalid suggestions
         suggestion_list = []
